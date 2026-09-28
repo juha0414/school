@@ -1,8 +1,9 @@
+
 import streamlit as st
 import requests
-import pandas as pd
 import re
-import plotly.express as px
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 # --------------------------------------------------
@@ -10,20 +11,17 @@ import plotly.express as px
 # --------------------------------------------------
 
 st.set_page_config(
-    page_title="우리 학교 메뉴별 급식",
-    page_icon="🍱",
+    page_title="우리 학교 달력별 급식",
+    page_icon="🍚",
     layout="wide"
 )
 
-st.title("🍱 우리 학교 메뉴별 급식")
-st.write(
-    "송탄고등학교에서 2025년 9월부터 2026년 9월까지 "
-    "중식으로 가장 자주 나온 메뉴를 확인합니다."
-)
+st.title("🍚 우리 학교 달력별 급식")
+st.write("송탄고등학교의 날짜별 중식 메뉴를 확인할 수 있습니다.")
 
 
 # --------------------------------------------------
-# 기본 정보
+# 송탄고등학교 고정 정보
 # --------------------------------------------------
 
 SCHOOL_NAME = "송탄고등학교"
@@ -32,547 +30,341 @@ SD_SCHUL_CODE = "7530480"
 
 MEAL_API_URL = "https://open.neis.go.kr/hub/mealServiceDietInfo"
 
-START_DATE = "20250901"
-END_DATE = "20260930"
-
-PAGE_SIZE = 1000
+KST = ZoneInfo("Asia/Seoul")
+TODAY_KST = datetime.now(KST).date()
 
 
 # --------------------------------------------------
-# 메뉴 이름 정리
+# 급식 API
 # --------------------------------------------------
 
-def clean_menu_name(menu):
-    menu = re.sub(r"\s*\([\d.]+\)\s*$", "", menu)
-    return menu.strip()
+@st.cache_data(ttl=1800)
+def get_meal(target_date):
+    """
+    선택한 하루의 송탄고등학교 중식 정보를 조회한다.
+    인증키 없이 사용한다.
+    """
+
+    date_text = target_date.strftime("%Y%m%d")
+
+    params = {
+        "Type": "json",
+        "ATPT_OFCDC_SC_CODE": ATPT_OFCDC_SC_CODE,
+        "SD_SCHUL_CODE": SD_SCHUL_CODE,
+        "MMEAL_SC_CODE": "2",
+        "MLSV_FROM_YMD": date_text,
+        "MLSV_TO_YMD": date_text,
+        "pSize": 10,
+        "pIndex": 1
+    }
+
+    try:
+        response = requests.get(
+            MEAL_API_URL,
+            params=params,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    except requests.RequestException:
+        return None, "NETWORK_ERROR"
+
+    except ValueError:
+        return None, "JSON_ERROR"
+
+    # 데이터가 없는 경우
+    if "RESULT" in data:
+        result = data["RESULT"]
+
+        if isinstance(result, dict):
+            code = result.get("CODE")
+
+            if code == "INFO-200":
+                return [], "NO_DATA"
+
+            return None, code
+
+    if "mealServiceDietInfo" not in data:
+        return [], "NO_DATA"
+
+    try:
+        rows = data["mealServiceDietInfo"][1]["row"]
+    except (IndexError, KeyError, TypeError):
+        return [], "NO_DATA"
+
+    if not rows:
+        return [], "NO_DATA"
+
+    return rows, "OK"
 
 
-def split_menus(menu_text):
-    if not menu_text:
-        return []
+# --------------------------------------------------
+# 메뉴 처리
+# --------------------------------------------------
+
+def clean_menu_text(menu_text):
+    """
+    <br/>를 줄바꿈으로 변경하고
+    불필요한 HTML 태그를 제거한다.
+    """
 
     text = menu_text.replace("<br/>", "\n")
     text = text.replace("<br />", "\n")
     text = text.replace("<br>", "\n")
 
-    menus = []
+    text = re.sub(r"<[^>]+>", "", text)
 
-    for line in text.splitlines():
-        menu = line.strip()
+    return text.strip()
 
-        if not menu:
-            continue
 
-        menu = clean_menu_name(menu)
+def remove_allergy_number(menu):
+    """
+    메뉴 이름 뒤의 알레르기 번호를 제거한다.
 
-        if menu:
-            menus.append(menu)
+    예:
+    쌀밥(5) -> 쌀밥
+    닭갈비(5.6.15) -> 닭갈비
+    """
+
+    return re.sub(r"\s*\([\d.]+\)\s*$", "", menu).strip()
+
+
+def split_menu(menu_text):
+    """
+    급식 전체 문자열을 메뉴별로 분리한다.
+    """
+
+    cleaned = clean_menu_text(menu_text)
+
+    menus = [
+        menu.strip()
+        for menu in cleaned.splitlines()
+        if menu.strip()
+    ]
 
     return menus
 
 
 # --------------------------------------------------
-# API 한 페이지 가져오기
+# CSS
 # --------------------------------------------------
 
-def request_meal_page(api_key, page_index):
-
-    params = {
-        "KEY": api_key,
-        "Type": "json",
-        "pIndex": page_index,
-        "pSize": PAGE_SIZE,
-        "ATPT_OFCDC_SC_CODE": ATPT_OFCDC_SC_CODE,
-        "SD_SCHUL_CODE": SD_SCHUL_CODE,
-        "MMEAL_SC_CODE": "2",
-        "MLSV_FROM_YMD": START_DATE,
-        "MLSV_TO_YMD": END_DATE
+st.markdown(
+    """
+    <style>
+    .meal-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 12px;
+        background-color: #ffffff;
+        min-height: 80px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
     }
 
-    response = requests.get(
-        MEAL_API_URL,
-        params=params,
-        timeout=20
+    .meal-card-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        line-height: 1.5;
+        color: #222222;
+    }
+
+    .school-name {
+        font-size: 1.15rem;
+        color: #666666;
+        margin-bottom: 15px;
+    }
+
+    .metric-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        padding: 18px;
+        text-align: center;
+        background-color: #fafafa;
+    }
+
+    .metric-label {
+        font-size: 0.95rem;
+        color: #666666;
+        margin-bottom: 5px;
+    }
+
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #222222;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# --------------------------------------------------
+# 날짜 + 알레르기 스위치
+# --------------------------------------------------
+
+date_col, allergy_col = st.columns([2, 1])
+
+with date_col:
+    selected_date = st.date_input(
+        "📅 날짜",
+        value=TODAY_KST,
+        format="YYYY-MM-DD"
     )
 
-    response.raise_for_status()
-
-    return response.json()
-
-
-# --------------------------------------------------
-# 전체 급식 데이터 가져오기
-# --------------------------------------------------
-
-@st.cache_data(ttl=3600)
-def load_all_meals(api_key):
-
-    # 첫 번째 페이지
-    first_data = request_meal_page(
-        api_key,
-        1
+with allergy_col:
+    st.write("")
+    st.write("")
+    show_allergy = st.toggle(
+        "알레르기 정보 보기",
+        value=True
     )
 
-    # API 오류 확인
-    if "RESULT" in first_data:
 
-        result = first_data["RESULT"]
+# --------------------------------------------------
+# 선택 날짜 표시
+# --------------------------------------------------
 
-        if isinstance(result, dict):
+weekday_names = [
+    "월요일",
+    "화요일",
+    "수요일",
+    "목요일",
+    "금요일",
+    "토요일",
+    "일요일"
+]
 
-            code = result.get("CODE")
-            message = result.get("MESSAGE", "")
+weekday = weekday_names[selected_date.weekday()]
 
-            if code == "INFO-200":
-                return [], 0, "NO_DATA"
+st.markdown(
+    f"### {selected_date.strftime('%Y년 %m월 %d일')} · {weekday}"
+)
 
-            return [], 0, f"{code}: {message}"
-
-    # 급식 데이터가 없는 경우
-    if "mealServiceDietInfo" not in first_data:
-        return [], 0, "급식 API 응답을 확인할 수 없습니다."
-
-    try:
-
-        head = first_data["mealServiceDietInfo"][0]["head"]
-
-        if isinstance(head, list):
-            total_count = int(
-                head[0]["list_total_count"]
-            )
-        else:
-            total_count = int(
-                head["list_total_count"]
-            )
-
-        first_rows = first_data["mealServiceDietInfo"][1]["row"]
-
-    except (KeyError, IndexError, TypeError, ValueError):
-
-        return [], 0, "전체 데이터 건수를 읽을 수 없습니다."
-
-    # 첫 번째 페이지 저장
-    all_rows = list(first_rows)
-
-    # 필요한 전체 페이지 수
-    total_pages = (
-        total_count + PAGE_SIZE - 1
-    ) // PAGE_SIZE
-
-    # 두 번째 페이지부터 끝까지 요청
-    if total_pages > 1:
-
-        progress = st.progress(0)
-
-        for page_index in range(2, total_pages + 1):
-
-            data = request_meal_page(
-                api_key,
-                page_index
-            )
-
-            if "RESULT" in data:
-
-                result = data["RESULT"]
-
-                if isinstance(result, dict):
-
-                    code = result.get("CODE")
-                    message = result.get("MESSAGE", "")
-
-                    return (
-                        all_rows,
-                        total_count,
-                        f"{code}: {message}"
-                    )
-
-            try:
-
-                rows = data["mealServiceDietInfo"][1]["row"]
-
-            except (KeyError, IndexError, TypeError):
-
-                rows = []
-
-            all_rows.extend(rows)
-
-            progress.progress(
-                page_index / total_pages
-            )
-
-        progress.empty()
-
-    return all_rows, total_count, "OK"
+st.markdown(
+    f'<div class="school-name">🏫 {SCHOOL_NAME} · 중식</div>',
+    unsafe_allow_html=True
+)
 
 
 # --------------------------------------------------
-# Secrets에서 인증키 가져오기
+# 급식 조회
 # --------------------------------------------------
 
-if "NEIS_API_KEY" not in st.secrets:
-
-    st.error(
-        "NEIS_API_KEY가 Streamlit Secrets에 설정되어 있지 않습니다."
-    )
-
-    st.stop()
-
-API_KEY = st.secrets["NEIS_API_KEY"]
+with st.spinner("급식 정보를 불러오는 중..."):
+    meal_rows, meal_status = get_meal(selected_date)
 
 
 # --------------------------------------------------
-# 데이터 가져오기
+# 급식이 없는 경우
 # --------------------------------------------------
 
-with st.spinner(
-    "2025년 9월부터 2026년 9월까지의 중식 데이터를 불러오는 중입니다..."
-):
+if meal_status == "NO_DATA" or not meal_rows:
 
-    try:
-
-        rows, total_count, status = load_all_meals(
-            API_KEY
-        )
-
-    except requests.RequestException:
-
-        st.error(
-            "나이스 급식 API에 연결하지 못했습니다. "
-            "잠시 후 다시 실행해 주세요."
-        )
-
-        st.stop()
-
-    except Exception as e:
-
-        st.error(
-            f"급식 데이터를 불러오는 중 문제가 발생했습니다: {e}"
-        )
-
-        st.stop()
-
-
-# --------------------------------------------------
-# 데이터가 없는 경우
-# --------------------------------------------------
-
-if status == "NO_DATA" or not rows:
-
-    st.info(
-        "선택한 기간에 중식 데이터가 없습니다."
-    )
-
-    st.stop()
+    st.info("🍽️ 급식이 없는 날입니다")
 
 
 # --------------------------------------------------
 # API 오류
 # --------------------------------------------------
 
-if status != "OK":
+elif meal_status != "OK":
 
     st.error(
-        f"급식 데이터를 모두 불러오지 못했습니다.\n\n{status}"
+        "급식 정보를 불러오지 못했습니다. "
+        "잠시 후 다시 시도해 주세요."
     )
 
-    st.stop()
-
 
 # --------------------------------------------------
-# DataFrame 만들기
+# 급식 표시
 # --------------------------------------------------
 
-df = pd.DataFrame(rows)
+else:
 
-df["MLSV_YMD"] = pd.to_datetime(
-    df["MLSV_YMD"],
-    format="%Y%m%d",
-    errors="coerce"
-)
+    meal = meal_rows[0]
 
-df = df[
-    df["DDISH_NM"].notna()
-].copy()
+    menu_text = meal.get("DDISH_NM", "")
+    calorie = meal.get("CAL_INFO", "")
 
+    menus = split_menu(menu_text)
 
-# --------------------------------------------------
-# 날짜별 메뉴 분리
-# --------------------------------------------------
+    # 알레르기 번호 표시 여부
+    if not show_allergy:
+        display_menus = [
+            remove_allergy_number(menu)
+            for menu in menus
+        ]
+    else:
+        display_menus = menus
 
-menu_records = []
+    # --------------------------------------------------
+    # 메뉴 가짓수 + 칼로리 큰 숫자 카드
+    # --------------------------------------------------
 
-for _, row in df.iterrows():
+    metric1, metric2 = st.columns(2)
 
-    meal_date = row["MLSV_YMD"]
-    menu_text = row.get("DDISH_NM", "")
-
-    menus = split_menus(menu_text)
-
-    # 같은 날 같은 메뉴가 여러 번 있어도
-    # 하루에 한 번만 세기
-    unique_menus = set(menus)
-
-    for menu in unique_menus:
-
-        menu_records.append(
-            {
-                "date": meal_date,
-                "menu": menu
-            }
+    with metric1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">🍱 메뉴 가짓수</div>
+                <div class="metric-value">{len(menus)}개</div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
 
+    with metric2:
+        calorie_display = calorie if calorie else "정보 없음"
 
-menu_df = pd.DataFrame(menu_records)
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">🔥 칼로리</div>
+                <div class="metric-value">{calorie_display}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
+    st.markdown("")
 
-if menu_df.empty:
+    # --------------------------------------------------
+    # 메뉴 카드
+    # --------------------------------------------------
 
-    st.info(
-        "집계할 메뉴 데이터가 없습니다."
-    )
+    st.subheader("🍚 오늘의 메뉴")
 
-    st.stop()
+    if display_menus:
 
+        # 화면 너비에 따라 3개씩 카드 배치
+        for i in range(0, len(display_menus), 3):
 
-# --------------------------------------------------
-# 같은 날짜 같은 메뉴 중복 제거
-# --------------------------------------------------
+            cols = st.columns(3)
 
-menu_df = menu_df.drop_duplicates(
-    subset=["date", "menu"]
-)
+            for j, col in enumerate(cols):
 
+                index = i + j
 
-# --------------------------------------------------
-# 메뉴별 나온 날짜 수
-# --------------------------------------------------
+                if index < len(display_menus):
 
-menu_days = (
-    menu_df
-    .groupby("menu")
-    .size()
-    .reset_index(name="days")
-)
+                    menu = display_menus[index]
 
+                    with col:
+                        st.markdown(
+                            f"""
+                            <div class="meal-card">
+                                <div class="meal-card-title">
+                                    {menu}
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
 
-# --------------------------------------------------
-# 실제 메뉴가 기록된 날짜 수
-# --------------------------------------------------
+    else:
+        st.info("메뉴 정보가 없습니다.")
 
-meal_days = menu_df["date"].nunique()
-
-
-# --------------------------------------------------
-# 비율 계산
-# --------------------------------------------------
-
-menu_days["ratio"] = (
-    menu_days["days"]
-    / meal_days
-    * 100
-)
-
-
-# --------------------------------------------------
-# 많이 나온 순서대로 정렬
-# --------------------------------------------------
-
-menu_days = menu_days.sort_values(
-    by=["days", "menu"],
-    ascending=[False, True]
-).reset_index(drop=True)
-
-
-# --------------------------------------------------
-# 순위
-# --------------------------------------------------
-
-menu_days["rank"] = menu_days.index + 1
-
-
-# --------------------------------------------------
-# 1위 정보
-# --------------------------------------------------
-
-top_menu = menu_days.iloc[0]
-
-top_menu_name = top_menu["menu"]
-top_menu_days = int(top_menu["days"])
-top_menu_ratio = float(top_menu["ratio"])
-
-
-# --------------------------------------------------
-# 설명
-# --------------------------------------------------
-
-st.caption(
-    "조회 기간: 2025년 9월 1일 ~ 2026년 9월 30일 · "
-    f"중식 · 전체 API 데이터 {total_count:,}건"
-)
-
-
-# --------------------------------------------------
-# 큰 숫자 카드
-# --------------------------------------------------
-
-card1, card2, card3 = st.columns(3)
-
-
-with card1:
-
-    st.metric(
-        "🍽️ 집계한 날수",
-        f"{meal_days:,}일"
-    )
-
-
-with card2:
-
-    st.metric(
-        "🥇 1위 메뉴",
-        top_menu_name
-    )
-
-
-with card3:
-
-    st.metric(
-        "📊 1위 비율",
-        f"{top_menu_ratio:.1f}%"
-    )
-
-
-st.divider()
-
-
-# --------------------------------------------------
-# 몇 위까지 볼지 선택
-# --------------------------------------------------
-
-max_rank = min(
-    10,
-    len(menu_days)
-)
-
-rank_count = st.slider(
-    "📊 몇 위까지 볼까요?",
-    min_value=1,
-    max_value=max_rank,
-    value=max_rank,
-    step=1
-)
-
-
-# --------------------------------------------------
-# TOP N
-# --------------------------------------------------
-
-chart_df = menu_days.head(
-    rank_count
-).copy()
-
-
-# --------------------------------------------------
-# 가로 막대그래프
-# --------------------------------------------------
-
-st.subheader(
-    f"🍱 메뉴별 등장 빈도 TOP {rank_count}"
-)
-
-
-fig = px.bar(
-    chart_df,
-    x="days",
-    y="menu",
-    orientation="h",
-    text="days",
-    custom_data=["ratio"],
-    labels={
-        "days": "나온 날수",
-        "menu": "메뉴"
-    },
-    color="days",
-    color_continuous_scale="Blues"
-)
-
-
-# 1위가 맨 위에 오도록 설정
-fig.update_yaxes(
-    categoryorder="array",
-    categoryarray=chart_df["menu"].tolist()[::-1]
-)
-
-
-fig.update_traces(
-    texttemplate="%{text}일",
-    textposition="outside",
-    hovertemplate=(
-        "<b>%{y}</b><br>"
-        "나온 날수: %{x}일<br>"
-        "비율: %{customdata[0]:.1f}%"
-        "<extra></extra>"
-    )
-)
-
-
-fig.update_layout(
-    height=max(
-        420,
-        rank_count * 55
-    ),
-    margin=dict(
-        l=20,
-        r=60,
-        t=20,
-        b=20
-    ),
-    coloraxis_showscale=False
-)
-
-
-st.plotly_chart(
-    fig,
-    use_container_width=True
-)
-
-
-# --------------------------------------------------
-# 표
-# --------------------------------------------------
-
-st.subheader("📋 메뉴별 나온 날수와 비율")
-
-
-table_df = chart_df[
-    ["rank", "menu", "days", "ratio"]
-].copy()
-
-
-table_df.columns = [
-    "순위",
-    "메뉴",
-    "나온 날수",
-    "비율"
-]
-
-
-table_df["나온 날수"] = (
-    table_df["나온 날수"]
-    .astype(int)
-    .astype(str)
-    + "일"
-)
-
-
-table_df["비율"] = (
-    table_df["비율"]
-    .map(lambda x: f"{x:.1f}%")
-)
-
-
-st.dataframe(
-    table_df,
-    use_container_width=True,
-    hide_index=True
-)

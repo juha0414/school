@@ -1,4 +1,5 @@
 
+
 import streamlit as st
 import requests
 import re
@@ -367,6 +368,7 @@ else:
 
     else:
         st.info("메뉴 정보가 없습니다.")
+
 ```python
 import streamlit as st
 import requests
@@ -988,4 +990,3 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
-

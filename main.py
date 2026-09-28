@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -482,12 +482,6 @@ if selected_school:
                 menu_text,
                 language=None
             )
-```
 
-### `requirements.txt`
 
-```text
-streamlit
-requests
-pandas
-```
+
